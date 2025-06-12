@@ -6,10 +6,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
-
-"""
-No need to store the private keys of users in the databases, simply we store a SECRET_KEY(i.e .env), and using mailId and SECRET_KEY we use them as seeds and derive the private-public keypairs, when every time we generate a private keypair same keypair is generated with same seeds.
-"""
+from cryptography.exceptions import InvalidTag
 
 class KeyManager:
     """Manages deterministic key generation from email and secret"""
@@ -20,7 +17,7 @@ class KeyManager:
         self.order = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
     
     def _derive_private_value(self, email):
-        """Derive private key integer from email using HKDF"""
+        """Derive private key integer from email(as seed) using HKDF"""
         salt = email.encode()
         hkdf = HKDF(
             algorithm=hashes.SHA256(),
@@ -56,14 +53,15 @@ class KeyManager:
         ).decode()
 
 class PRESystem:
-    """Proxy Re-Encryption System"""
+    """Proxy Re-Encryption System with Group Support"""
     def __init__(self):
         # Hardcoded secret for demo purposes
         self.secret = "supersecretkey1234567890!@#$%^&*()"
         self.key_manager = KeyManager(self.secret)
         self.users = set()
-        self.messages = {}
-        self.rekeys = {}
+        self.groups = {}  # Dictionary to store groups and their members
+        self.messages = {}  # Stores messages (direct and group)
+        self.rekeys = {}   # Stores re-encryption keys
     
     def register_user(self, email):
         """Register a new user"""
@@ -75,6 +73,16 @@ class PRESystem:
     def is_registered(self, email):
         """Check if user is registered"""
         return email in self.users
+    
+    def create_group(self, group_name, members):
+        """Create a group with specified members"""
+        if group_name in self.groups:
+            raise ValueError("Group already exists")
+        for member in members:
+            if not self.is_registered(member):
+                raise ValueError(f"Member {member} not registered")
+        self.groups[group_name] = set(members)
+        return True
     
     def encrypt_message(self, sender_email, message):
         """Encrypt message under sender's public key"""
@@ -315,8 +323,8 @@ class PRESystem:
         unpadder = padding.PKCS7(128).unpadder()
         return unpadder.update(padded_plaintext) + unpadder.finalize()
     
-    def send_message(self, sender_email, receiver_email, message):
-        """Complete message sending flow"""
+    def send_direct_message(self, sender_email, receiver_email, message):
+        """Send a direct message from sender to receiver"""
         # Store original ciphertext for sender
         original_cipher = self.encrypt_message(sender_email, message)
         
@@ -326,10 +334,40 @@ class PRESystem:
         # Store message in both formats
         message_id = hashlib.sha256(os.urandom(32)).hexdigest()
         self.messages[message_id] = {
+            'type': 'direct',
             'sender': sender_email,
             'receiver': receiver_email,
             'original_cipher': original_cipher,
-            'reencrypted_cipher': reencrypted_cipher
+            'reencrypted_cipher': {receiver_email: reencrypted_cipher}
+        }
+        
+        return message_id
+    
+    def send_group_message(self, sender_email, group_name, message):
+        """Send a message to a group, re-encrypting for all members"""
+        if not self.is_registered(sender_email):
+            raise ValueError("Sender not registered")
+        if group_name not in self.groups:
+            raise ValueError("Group does not exist")
+        if sender_email not in self.groups[group_name]:
+            raise ValueError("Sender not a member of the group")
+        
+        # Encrypt the message under sender's public key
+        original_cipher = self.encrypt_message(sender_email, message)
+        
+        # Re-encrypt for each group member
+        reencrypted_ciphers = {}
+        for member in self.groups[group_name]:
+            reencrypted_ciphers[member] = self.reencrypt(sender_email, member, original_cipher)
+        
+        # Store message
+        message_id = hashlib.sha256(os.urandom(32)).hexdigest()
+        self.messages[message_id] = {
+            'type': 'group',
+            'sender': sender_email,
+            'group': group_name,
+            'original_cipher': original_cipher,
+            'reencrypted_cipher': reencrypted_ciphers
         }
         
         return message_id
@@ -340,57 +378,98 @@ if __name__ == "__main__":
     pre = PRESystem()
     
     # Register users
-    pre.register_user("alice@example.com")
-    pre.register_user("bob@example.com")
+    users = [
+        "alice@example.com",
+        "bob@example.com",
+        "rama@example.com",
+        "koti@example.com",
+        "sasi@example.com",
+        "ramya@example.com",
+        "abhi@example.com"
+    ]
+    for user in users:
+        pre.register_user(user)
     
-    print("Users registered successfully")
+    print("All users registered successfully")
     print(f"Alice public key: {pre.key_manager.serialize_public_key('alice@example.com')[:50]}...")
-    print(f"Bob public key: {pre.key_manager.serialize_public_key('bob@example.com')[:50]}...\n")
+    print(f"Bob public key: {pre.key_manager.serialize_public_key('bob@example.com')[:50]}...")
+    print(f"Rama public key: {pre.key_manager.serialize_public_key('rama@example.com')[:50]}...")
+    print(f"Koti public key: {pre.key_manager.serialize_public_key('koti@example.com')[:50]}...")
+    print(f"Sasi public key: {pre.key_manager.serialize_public_key('sasi@example.com')[:50]}...")
+    print(f"Ramya public key: {pre.key_manager.serialize_public_key('ramya@example.com')[:50]}...")
+    print(f"Abhi public key: {pre.key_manager.serialize_public_key('abhi@example.com')[:50]}...\n")
+    
+    # Create group with Rama, Koti, Sasi, Ramya, Abhi
+    group_members = ["rama@example.com", "koti@example.com", "sasi@example.com", "ramya@example.com", "abhi@example.com"]
+    pre.create_group("project_team", group_members)
+    print("Group 'project_team' created with members:", group_members)
+    
+    # Test bidirectional communication between Alice and Bob
+    print("\nTesting Alice and Bob bidirectional communication...")
     
     # Alice sends a message to Bob
-    message = b"Hello Bob, this is a confidential message!"
-    print(f"Original message: {message.decode()}")
+    message1 = b"Hello Bob, this is Alice's confidential message!"
+    message_id1 = pre.send_direct_message("alice@example.com", "bob@example.com", message1)
+    print(f"\nAlice's message to Bob sent with ID: {message_id1}")
+    stored_msg1 = pre.messages[message_id1]
     
-    # Complete sending flow
-    message_id = pre.send_message("alice@example.com", "bob@example.com", message)
-    print(f"\nMessage sent with ID: {message_id}")
+    # Alice decrypts her original message
+    alice_decrypted1 = pre.decrypt_original("alice@example.com", stored_msg1['original_cipher'])
+    print(f"Alice decrypted her original message: {alice_decrypted1.decode()}")
     
-    # Retrieve stored message
-    stored_msg = pre.messages[message_id]
-    
-    # Alice can decrypt the original ciphertext
-    alice_decrypted = pre.decrypt_original(
-        "alice@example.com",
-        stored_msg['original_cipher']
-    )
-    print(f"\nAlice decrypted her original message: {alice_decrypted.decode()}")
-    
-    # Bob can decrypt the re-encrypted ciphertext
-    bob_decrypted = pre.decrypt_reencrypted(
-        "bob@example.com",
-        stored_msg['reencrypted_cipher']
-    )
-    print(f"Bob decrypted the re-encrypted message: {bob_decrypted.decode()}")
-    
-    # Test bidirectional communication
-    print("\nTesting bidirectional communication...")
+    # Bob decrypts the re-encrypted message
+    bob_decrypted1 = pre.decrypt_reencrypted("bob@example.com", stored_msg1['reencrypted_cipher']['bob@example.com'])
+    print(f"Bob decrypted the re-encrypted message: {bob_decrypted1.decode()}")
     
     # Bob sends a message to Alice
     message2 = b"Hello Alice, this is Bob's secure reply!"
-    message_id2 = pre.send_message("bob@example.com", "alice@example.com", message2)
-    
+    message_id2 = pre.send_direct_message("bob@example.com", "alice@example.com", message2)
+    print(f"\nBob's message to Alice sent with ID: {message_id2}")
     stored_msg2 = pre.messages[message_id2]
     
-    # Bob can decrypt his original message
-    bob_decrypted2 = pre.decrypt_original(
-        "bob@example.com",
-        stored_msg2['original_cipher']
-    )
-    print(f"\nBob decrypted his original message: {bob_decrypted2.decode()}")
+    # Bob decrypts his original message
+    bob_decrypted2 = pre.decrypt_original("bob@example.com", stored_msg2['original_cipher'])
+    print(f"Bob decrypted his original message: {bob_decrypted2.decode()}")
     
-    # Alice can decrypt the re-encrypted message
-    alice_decrypted2 = pre.decrypt_reencrypted(
-        "alice@example.com",
-        stored_msg2['reencrypted_cipher']
-    )
+    # Alice decrypts the re-encrypted message
+    alice_decrypted2 = pre.decrypt_reencrypted("alice@example.com", stored_msg2['reencrypted_cipher']['alice@example.com'])
     print(f"Alice decrypted the re-encrypted message: {alice_decrypted2.decode()}")
+    
+    # Test group communication
+    print("\nTesting group communication in 'project_team'...")
+    
+    # Rama sends a message to the group
+    group_message1 = b"Team, this is Rama with project updates!"
+    group_message_id1 = pre.send_group_message("rama@example.com", "project_team", group_message1)
+    print(f"\nRama's group message sent with ID: {group_message_id1}")
+    stored_group_msg1 = pre.messages[group_message_id1]
+    
+    # All group members try to decrypt Rama's message
+    for member in group_members:
+        decrypted = pre.decrypt_reencrypted(member, stored_group_msg1['reencrypted_cipher'][member])
+        print(f"{member} decrypted Rama's group message: {decrypted.decode()}")
+    
+    # Koti sends a message to the group
+    group_message2 = b"Hi team, Koti here with additional notes!"
+    group_message_id2 = pre.send_group_message("koti@example.com", "project_team", group_message2)
+    print(f"\nKoti's group message sent with ID: {group_message_id2}")
+    stored_group_msg2 = pre.messages[group_message_id2]
+    
+    # All group members try to decrypt Koti's message
+    for member in group_members:
+        decrypted = pre.decrypt_reencrypted(member, stored_group_msg2['reencrypted_cipher'][member])
+        print(f"{member} decrypted Koti's group message: {decrypted.decode()}")
+    
+    # Test that Alice and Bob cannot decrypt group messages
+    print("\nTesting access control: Alice and Bob attempting to decrypt group messages...")
+    try:
+        pre.decrypt_reencrypted("alice@example.com", stored_group_msg1['reencrypted_cipher']['rama@example.com'])
+        print("Error: Alice should not be able to decrypt group message")
+    except InvalidTag:
+        print("Alice correctly cannot access group message")
+    
+    try:
+        pre.decrypt_reencrypted("bob@example.com", stored_group_msg2['reencrypted_cipher']['koti@example.com'])
+        print("Error: Bob should not be able to decrypt group message")
+    except InvalidTag:
+        print("Bob correctly cannot access group message")
