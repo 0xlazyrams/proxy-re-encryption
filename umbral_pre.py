@@ -29,10 +29,10 @@ bob_public_key = bob_private_key.public_key()
 
 # Use Alice's public key to encrypt
 capsule, ciphertext = encrypt(alice_public_key, plain)
+print(f"Ciphet text encrypted by alice: {ciphertext}")
 
 # Try Alice's private key to decrypt
 cleartext = decrypt_original(alice_private_key, capsule, ciphertext)
-
 
 # Split key into fragments for t out of n
 kfrags = generate_kfrags(delegating_sk=alice_private_key,
